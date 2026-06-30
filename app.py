@@ -18,13 +18,34 @@ st.markdown("""
     .signal-high { color: #ef4444; font-weight: 600; }
     .signal-mid  { color: #f59e0b; font-weight: 600; }
     .signal-low  { color: #22c55e; font-weight: 600; }
+    .news-card {
+        border: 1px solid #2a2a3e;
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        background: #1e1e2e;
+    }
+    .news-title { font-size: 14px; font-weight: 600; line-height: 1.4; }
+    .news-meta  { font-size: 11px; color: #6b6b80; margin-top: 4px; }
+    .news-ticker-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 600;
+        background: #1a1a3e;
+        color: #818cf8;
+        margin-right: 6px;
+    }
+    a { color: #818cf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
 </style>
 """, unsafe_allow_html=True)
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-DEFAULT_TICKERS  = ['AAOI','MU','GLW','ONTO','POET','MRVL','KLIC','LSRCY','SAP','AMBA','BE','AIS']
-TICKERS_FILE     = "saved_tickers.json"
-CACHE_FILE       = "previous_readings.json"
+DEFAULT_TICKERS = ['AAOI','MU','GLW','ONTO','POET','MRVL','KLIC','LSRCY','SAP','AMBA','BE','AIS']
+TICKERS_FILE    = "saved_tickers.json"
+CACHE_FILE      = "previous_readings.json"
 
 # ── PERSIST TICKER LIST ───────────────────────────────────────────────────────
 def load_ticker_list():
@@ -43,7 +64,6 @@ def save_ticker_list(tickers):
         json.dump(tickers, f)
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
-# Load from file on first run; subsequent reruns keep session_state values
 if "ticker_list" not in st.session_state:
     st.session_state.ticker_list = load_ticker_list()
 if "selected_tickers" not in st.session_state:
@@ -118,6 +138,26 @@ def signal_badge(pct_val, high_thresh, mid_thresh):
     if pct_val >= mid_thresh:  return f"🟡 MODERATE ({pct_val:.1f}%)", "signal-mid"
     return f"🟢 LOW ({pct_val:.1f}%)", "signal-low"
 
+def time_ago(ts):
+    """Convert a Unix timestamp or datetime to a human-readable 'X ago' string."""
+    try:
+        if isinstance(ts, (int, float)):
+            dt = datetime.fromtimestamp(ts)
+        elif isinstance(ts, datetime):
+            dt = ts
+        else:
+            dt = pd.to_datetime(ts)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+        diff = datetime.now() - dt
+        s = int(diff.total_seconds())
+        if s < 3600:   return f"{s//60}m ago"
+        if s < 86400:  return f"{s//3600}h ago"
+        if s < 604800: return f"{s//86400}d ago"
+        return dt.strftime("%d %b %Y")
+    except:
+        return str(ts)[:10]
+
 # ── DATA FETCH ────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_short_interest(tickers):
@@ -159,11 +199,76 @@ def fetch_insider(ticker):
     except: pass
     return None
 
+@st.cache_data(ttl=1800)   # news refreshes every 30 min
+def fetch_news_for_ticker(ticker):
+    """Fetch news via yfinance for a single ticker."""
+    try:
+        t = yf.Ticker(ticker)
+        news = t.news  # list of dicts
+        if not news:
+            return []
+        results = []
+        for item in news[:15]:
+            content = item.get("content", {})
+            # yfinance >= 0.2.x wraps in a 'content' dict
+            if content:
+                title     = content.get("title", "")
+                summary   = content.get("summary", "")
+                pub_date  = content.get("pubDate", "")
+                link      = content.get("canonicalUrl", {}).get("url", "") or \
+                            content.get("clickThroughUrl", {}).get("url", "")
+                provider  = content.get("provider", {}).get("displayName", "")
+            else:
+                # older yfinance format
+                title    = item.get("title", "")
+                summary  = item.get("summary", item.get("description", ""))
+                pub_date = item.get("providerPublishTime", "")
+                link     = item.get("link", "")
+                provider = item.get("publisher", "")
+
+            if title:
+                results.append({
+                    "ticker":   ticker,
+                    "title":    title,
+                    "summary":  summary,
+                    "date":     pub_date,
+                    "link":     link,
+                    "provider": provider,
+                })
+        return results
+    except Exception as e:
+        return []
+
+@st.cache_data(ttl=1800)
+def fetch_all_news(tickers):
+    """Aggregate and deduplicate news across all tickers."""
+    all_news = []
+    seen_titles = set()
+    for ticker in tickers:
+        items = fetch_news_for_ticker(ticker)
+        for item in items:
+            key = item["title"].strip().lower()[:80]
+            if key not in seen_titles:
+                seen_titles.add(key)
+                all_news.append(item)
+        time.sleep(0.2)
+    # Sort by date descending (best effort)
+    def sort_key(x):
+        try:
+            d = x["date"]
+            if isinstance(d, (int, float)):
+                return float(d)
+            return float(pd.to_datetime(d).timestamp())
+        except:
+            return 0
+    all_news.sort(key=sort_key, reverse=True)
+    return all_news
+
 # ── HEADER ────────────────────────────────────────────────────────────────────
 c1, c2 = st.columns([5, 1])
 with c1:
     st.title("📡 AI Supply Chain Portfolio")
-    st.caption(f"Short interest · Institutional flow (13F) · Insider trades  |  {datetime.now().strftime('%d %b %Y %H:%M')}")
+    st.caption(f"Short interest · Institutional flow (13F) · Insider trades · News  |  {datetime.now().strftime('%d %b %Y %H:%M')}")
 with c2:
     st.write("")
     st.write("")
@@ -178,14 +283,11 @@ with st.sidebar:
     st.header("⚙️ Settings")
     st.markdown("**Manage tickers**")
 
-    # Add
     col_input, col_btn = st.columns([3, 1])
     with col_input:
         new_ticker = st.text_input(
-            "Add ticker",
-            placeholder="e.g. NVDA",
-            label_visibility="collapsed",
-            key="new_ticker_input"
+            "Add ticker", placeholder="e.g. NVDA",
+            label_visibility="collapsed", key="new_ticker_input"
         ).upper().strip()
     with col_btn:
         st.write("")
@@ -195,18 +297,15 @@ with st.sidebar:
         if new_ticker not in st.session_state.ticker_list:
             st.session_state.ticker_list.append(new_ticker)
             st.session_state.selected_tickers.append(new_ticker)
-            save_ticker_list(st.session_state.ticker_list)   # ← persist to file
+            save_ticker_list(st.session_state.ticker_list)
             st.success(f"{new_ticker} added and saved.")
             st.rerun()
         else:
             st.info(f"{new_ticker} already in list.")
 
-    # Remove
     remove_ticker = st.selectbox(
-        "Remove ticker",
-        options=["—"] + st.session_state.ticker_list,
-        index=0,
-        key="remove_select"
+        "Remove ticker", options=["—"] + st.session_state.ticker_list,
+        index=0, key="remove_select"
     )
     if st.button("Remove selected", use_container_width=True):
         if remove_ticker != "—":
@@ -214,11 +313,10 @@ with st.sidebar:
                 st.session_state.ticker_list.remove(remove_ticker)
             if remove_ticker in st.session_state.selected_tickers:
                 st.session_state.selected_tickers.remove(remove_ticker)
-            save_ticker_list(st.session_state.ticker_list)   # ← persist to file
-            st.success(f"{remove_ticker} removed and saved.")
+            save_ticker_list(st.session_state.ticker_list)
+            st.success(f"{remove_ticker} removed.")
             st.rerun()
 
-    # Active toggle
     st.markdown("**Active tickers**")
     st.session_state.selected_tickers = st.multiselect(
         "Select which to show",
@@ -228,11 +326,10 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-    # Reset
     if st.button("↺ Reset to defaults", use_container_width=True):
-        st.session_state.ticker_list     = DEFAULT_TICKERS.copy()
+        st.session_state.ticker_list      = DEFAULT_TICKERS.copy()
         st.session_state.selected_tickers = DEFAULT_TICKERS.copy()
-        save_ticker_list(DEFAULT_TICKERS)                    # ← persist to file
+        save_ticker_list(DEFAULT_TICKERS)
         st.rerun()
 
     st.divider()
@@ -241,8 +338,13 @@ with st.sidebar:
     mid_thresh  = st.slider("🟡 Moderate short %", 5, 20, 10)
 
     st.divider()
+    st.markdown("**News settings**")
+    news_per_ticker = st.slider("Articles per ticker (per-ticker view)", 3, 15, 5)
+    show_summary    = st.checkbox("Show article summaries", value=True)
+
+    st.divider()
     st.markdown("**Delta tracking**")
-    st.caption("▲▼ compares to the last time data was loaded.")
+    st.caption("▲▼ compares to last data load.")
     if st.button("🗑️ Reset baseline", use_container_width=True):
         if os.path.exists(CACHE_FILE):
             os.remove(CACHE_FILE)
@@ -253,34 +355,40 @@ with st.sidebar:
     st.markdown("- Short interest: Yahoo Finance / FINRA")
     st.markdown("- Institutional: Yahoo Finance / SEC 13F")
     st.markdown("- Insider trades: Yahoo Finance / SEC Form 4")
+    st.markdown("- News: Yahoo Finance (30 min cache)")
     st.markdown("- No API key required")
 
 selected = st.session_state.selected_tickers
-
 if not selected:
     st.warning("No tickers selected. Add or select tickers in the sidebar.")
     st.stop()
 
-# ── LOAD DATA ─────────────────────────────────────────────────────────────────
+# ── LOAD MARKET DATA ──────────────────────────────────────────────────────────
 previous = load_previous()
-
-with st.spinner("Fetching live data from Yahoo Finance..."):
+with st.spinner("Fetching live market data..."):
     data = fetch_short_interest(tuple(selected))
-
 save_current(data)
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB 1 — SHORT INTEREST
+# TABS
 # ════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3 = st.tabs(["📊 Short Interest", "🏛️ Fund Flow (13F)", "👤 Insider Activity"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Short Interest",
+    "🏛️ Fund Flow (13F)",
+    "👤 Insider Activity",
+    "📰 News"
+])
 
+# ────────────────────────────────────────────────────────────────────────────
+# TAB 1 — SHORT INTEREST
+# ────────────────────────────────────────────────────────────────────────────
 with tab1:
     valid = [d for d in data if d["Short % Float"] is not None]
 
     if valid:
         def to_val(d):
             v = d["Short % Float"]
-            return v * 100 if float(v) < 1 else float(v)
+            return float(v) * 100 if float(v) < 1 else float(v)
 
         avg_short    = sum(to_val(d) for d in valid) / len(valid)
         high_count   = sum(1 for d in valid if to_val(d) >= high_thresh)
@@ -318,42 +426,33 @@ with tab1:
         sample_prev = next((previous[d["Ticker"]] for d in valid if d["Ticker"] in previous), None)
         if sample_prev:
             st.caption(f"▲▼ delta vs last reading: {sample_prev.get('timestamp','—')}")
-
         st.divider()
 
-    # Per-ticker cards
     cols = st.columns(2)
     for i, d in enumerate(data):
         pct_val, pct_str = to_pct_display(d["Short % Float"])
         dtc = d["Days to Cover"]
-
         prev_d       = previous.get(d["Ticker"], {})
         prev_pct_raw = prev_d.get("short_pct")
         prev_dtc     = prev_d.get("dtc")
-
         prev_pct_val = None
         if prev_pct_raw is not None:
             prev_pct_val = float(prev_pct_raw)*100 if float(prev_pct_raw)<1 else float(prev_pct_raw)
-
         pct_delta, pct_color = delta_str(pct_val, prev_pct_val, unit="%", higher_is_bad=True)
         dtc_delta, dtc_color = delta_str(dtc, prev_dtc, unit="d", higher_is_bad=True)
         badge, badge_cls     = signal_badge(pct_val, high_thresh, mid_thresh)
-
         with cols[i % 2]:
             with st.container(border=True):
                 r1, r2 = st.columns([2, 3])
                 with r1:
                     st.markdown(f"### {d['Ticker']}")
-                    st.markdown(f"<span class='{badge_cls}'>{badge}</span>",
-                                unsafe_allow_html=True)
+                    st.markdown(f"<span class='{badge_cls}'>{badge}</span>", unsafe_allow_html=True)
                     if d.get("Price"):
                         st.caption(f"Price: ${d['Price']:.2f}")
                 with r2:
                     m1, m2 = st.columns(2)
-                    m1.metric("Short % Float", pct_str,
-                              delta=pct_delta, delta_color=pct_color)
-                    m2.metric("Days to Cover",
-                              f"{dtc:.1f}" if dtc else "—",
+                    m1.metric("Short % Float", pct_str, delta=pct_delta, delta_color=pct_color)
+                    m2.metric("Days to Cover", f"{dtc:.1f}" if dtc else "—",
                               delta=dtc_delta, delta_color=dtc_color)
                 st.caption(
                     f"Shares short: {fmt_num(d['Shares Short'])}  ·  "
@@ -361,7 +460,6 @@ with tab1:
                     f"Avg vol: {fmt_num(d['Avg Volume'])}"
                 )
 
-    # Full table
     st.divider()
     st.subheader("Full table")
     table_rows = []
@@ -374,8 +472,7 @@ with tab1:
             prev_pct_val = float(prev_pct_raw)*100 if float(prev_pct_raw)<1 else float(prev_pct_raw)
         if pct_val is not None and prev_pct_val is not None:
             diff = pct_val - prev_pct_val
-            chg = (f"▲ +{diff:.1f}%" if diff > 0.01
-                   else (f"▼ {diff:.1f}%" if diff < -0.01 else "—"))
+            chg = f"▲ +{diff:.1f}%" if diff > 0.01 else (f"▼ {diff:.1f}%" if diff < -0.01 else "—")
         else:
             chg = "—"
         table_rows.append({
@@ -393,13 +490,12 @@ with tab1:
         })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 # TAB 2 — INSTITUTIONAL FLOW
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 with tab2:
     st.subheader("Institutional Holders — SEC 13F (quarterly)")
     st.caption("Top holders by shares held.")
-
     for ticker in selected:
         with st.expander(f"**{ticker}** — Top Institutional Holders", expanded=False):
             with st.spinner(f"Loading {ticker}..."):
@@ -426,9 +522,9 @@ with tab2:
             else:
                 st.info(f"No institutional holder data available for {ticker}.")
 
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 # TAB 3 — INSIDER ACTIVITY
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 with tab3:
     st.subheader("Insider Transactions — SEC Form 4")
     st.caption("Recent buy/sell activity by executives and directors.")
@@ -452,5 +548,99 @@ with tab3:
     else:
         st.info("No recent insider transaction data found.")
 
+# ────────────────────────────────────────────────────────────────────────────
+# TAB 4 — NEWS
+# ────────────────────────────────────────────────────────────────────────────
+with tab4:
+    st.subheader("📰 Portfolio News Feed")
+    st.caption("Latest news across all your tickers via Yahoo Finance · refreshes every 30 min")
+
+    # View toggle
+    news_view = st.radio(
+        "View",
+        ["All tickers (combined feed)", "By ticker"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    st.divider()
+
+    # ── COMBINED FEED ─────────────────────────────────────────────────────────
+    if news_view == "All tickers (combined feed)":
+        with st.spinner("Loading news for all tickers..."):
+            all_news = fetch_all_news(tuple(selected))
+
+        if not all_news:
+            st.info("No news found. Yahoo Finance may be temporarily unavailable.")
+        else:
+            # Ticker filter chips
+            filter_tickers = st.multiselect(
+                "Filter by ticker",
+                options=selected,
+                default=selected,
+                label_visibility="collapsed"
+            )
+            filtered = [n for n in all_news if n["ticker"] in filter_tickers]
+            st.caption(f"Showing {len(filtered)} articles")
+            st.write("")
+
+            for item in filtered:
+                title    = item.get("title", "No title")
+                summary  = item.get("summary", "")
+                link     = item.get("link", "")
+                provider = item.get("provider", "")
+                date_val = item.get("date", "")
+                ticker   = item.get("ticker", "")
+                age      = time_ago(date_val) if date_val else ""
+
+                with st.container(border=True):
+                    # Ticker badge + age
+                    meta_cols = st.columns([1, 6])
+                    with meta_cols[0]:
+                        st.markdown(
+                            f"<span class='news-ticker-badge'>{ticker}</span>",
+                            unsafe_allow_html=True
+                        )
+                    with meta_cols[1]:
+                        st.caption(f"{provider}  ·  {age}" if provider else age)
+
+                    # Title as link
+                    if link:
+                        st.markdown(f"**[{title}]({link})**")
+                    else:
+                        st.markdown(f"**{title}**")
+
+                    # Summary
+                    if show_summary and summary:
+                        st.caption(summary[:220] + ("…" if len(summary) > 220 else ""))
+
+    # ── BY TICKER ─────────────────────────────────────────────────────────────
+    else:
+        for ticker in selected:
+            with st.expander(f"**{ticker}** — Latest News", expanded=False):
+                with st.spinner(f"Loading news for {ticker}..."):
+                    ticker_news = fetch_news_for_ticker(ticker)
+
+                if not ticker_news:
+                    st.info(f"No recent news found for {ticker}.")
+                    continue
+
+                for item in ticker_news[:news_per_ticker]:
+                    title    = item.get("title", "No title")
+                    summary  = item.get("summary", "")
+                    link     = item.get("link", "")
+                    provider = item.get("provider", "")
+                    date_val = item.get("date", "")
+                    age      = time_ago(date_val) if date_val else ""
+
+                    with st.container(border=True):
+                        st.caption(f"{provider}  ·  {age}" if provider else age)
+                        if link:
+                            st.markdown(f"**[{title}]({link})**")
+                        else:
+                            st.markdown(f"**{title}**")
+                        if show_summary and summary:
+                            st.caption(summary[:220] + ("…" if len(summary) > 220 else ""))
+
 st.divider()
-st.caption("Data via Yahoo Finance (FINRA short interest · SEC 13F · SEC Form 4). Cache refreshes every hour. Not financial advice.")
+st.caption("Data via Yahoo Finance (FINRA short interest · SEC 13F · SEC Form 4 · News). Not financial advice.")
