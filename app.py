@@ -21,17 +21,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── CONFIG ───────────────────────────────────────────────────────────────────
-DEFAULT_TICKERS = ['AAOI','MU','GLW','ONTO','POET','MRVL','KLIC','LSRCY','SAP','AMBA','BE','AIS']
-CACHE_FILE = "previous_readings.json"
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+DEFAULT_TICKERS  = ['AAOI','MU','GLW','ONTO','POET','MRVL','KLIC','LSRCY','SAP','AMBA','BE','AIS']
+TICKERS_FILE     = "saved_tickers.json"
+CACHE_FILE       = "previous_readings.json"
 
-# ── SESSION STATE INIT ───────────────────────────────────────────────────────
+# ── PERSIST TICKER LIST ───────────────────────────────────────────────────────
+def load_ticker_list():
+    if os.path.exists(TICKERS_FILE):
+        try:
+            with open(TICKERS_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list) and data:
+                    return data
+        except:
+            pass
+    return DEFAULT_TICKERS.copy()
+
+def save_ticker_list(tickers):
+    with open(TICKERS_FILE, "w") as f:
+        json.dump(tickers, f)
+
+# ── SESSION STATE INIT ────────────────────────────────────────────────────────
+# Load from file on first run; subsequent reruns keep session_state values
 if "ticker_list" not in st.session_state:
-    st.session_state.ticker_list = DEFAULT_TICKERS.copy()
+    st.session_state.ticker_list = load_ticker_list()
 if "selected_tickers" not in st.session_state:
-    st.session_state.selected_tickers = DEFAULT_TICKERS.copy()
+    st.session_state.selected_tickers = load_ticker_list()
 
-# ── CACHE HELPERS ─────────────────────────────────────────────────────────────
+# ── BASELINE CACHE ────────────────────────────────────────────────────────────
 def load_previous():
     if os.path.exists(CACHE_FILE):
         try:
@@ -158,11 +176,9 @@ st.divider()
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-
-    # ── Ticker management ────────────────────────────────────────────────────
     st.markdown("**Manage tickers**")
 
-    # Add ticker
+    # Add
     col_input, col_btn = st.columns([3, 1])
     with col_input:
         new_ticker = st.text_input(
@@ -172,18 +188,20 @@ with st.sidebar:
             key="new_ticker_input"
         ).upper().strip()
     with col_btn:
-        st.write("")  # vertical align
+        st.write("")
         add_clicked = st.button("Add", use_container_width=True)
 
     if add_clicked and new_ticker:
         if new_ticker not in st.session_state.ticker_list:
             st.session_state.ticker_list.append(new_ticker)
             st.session_state.selected_tickers.append(new_ticker)
-            st.success(f"{new_ticker} added.")
+            save_ticker_list(st.session_state.ticker_list)   # ← persist to file
+            st.success(f"{new_ticker} added and saved.")
+            st.rerun()
         else:
             st.info(f"{new_ticker} already in list.")
 
-    # Remove ticker
+    # Remove
     remove_ticker = st.selectbox(
         "Remove ticker",
         options=["—"] + st.session_state.ticker_list,
@@ -196,10 +214,11 @@ with st.sidebar:
                 st.session_state.ticker_list.remove(remove_ticker)
             if remove_ticker in st.session_state.selected_tickers:
                 st.session_state.selected_tickers.remove(remove_ticker)
-            st.success(f"{remove_ticker} removed.")
+            save_ticker_list(st.session_state.ticker_list)   # ← persist to file
+            st.success(f"{remove_ticker} removed and saved.")
             st.rerun()
 
-    # Active/inactive toggle via multiselect
+    # Active toggle
     st.markdown("**Active tickers**")
     st.session_state.selected_tickers = st.multiselect(
         "Select which to show",
@@ -209,9 +228,11 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
+    # Reset
     if st.button("↺ Reset to defaults", use_container_width=True):
-        st.session_state.ticker_list = DEFAULT_TICKERS.copy()
+        st.session_state.ticker_list     = DEFAULT_TICKERS.copy()
         st.session_state.selected_tickers = DEFAULT_TICKERS.copy()
+        save_ticker_list(DEFAULT_TICKERS)                    # ← persist to file
         st.rerun()
 
     st.divider()
@@ -221,7 +242,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**Delta tracking**")
-    st.caption("▲▼ compares to the last time data was loaded. Reset to start a fresh baseline.")
+    st.caption("▲▼ compares to the last time data was loaded.")
     if st.button("🗑️ Reset baseline", use_container_width=True):
         if os.path.exists(CACHE_FILE):
             os.remove(CACHE_FILE)
@@ -259,26 +280,26 @@ with tab1:
     if valid:
         def to_val(d):
             v = d["Short % Float"]
-            return v * 100 if v < 1 else v
+            return v * 100 if float(v) < 1 else float(v)
 
         avg_short    = sum(to_val(d) for d in valid) / len(valid)
         high_count   = sum(1 for d in valid if to_val(d) >= high_thresh)
-        most_shorted = max(valid, key=lambda d: d["Short % Float"])
+        most_shorted = max(valid, key=lambda d: float(d["Short % Float"]))
         ms_val       = to_val(most_shorted)
 
         prev_vals = [
             previous[d["Ticker"]]["short_pct"] for d in valid
             if d["Ticker"] in previous and previous[d["Ticker"]]["short_pct"] is not None
         ]
-        prev_avg = (sum((v*100 if v<1 else v) for v in prev_vals) / len(prev_vals)
+        prev_avg = (sum((float(v)*100 if float(v)<1 else float(v)) for v in prev_vals) / len(prev_vals)
                     if prev_vals else None)
         prev_high = (
             sum(1 for d in valid
                 if d["Ticker"] in previous
                 and previous[d["Ticker"]]["short_pct"] is not None
-                and ((previous[d["Ticker"]]["short_pct"]*100
-                      if previous[d["Ticker"]]["short_pct"] < 1
-                      else previous[d["Ticker"]]["short_pct"]) >= high_thresh))
+                and ((float(previous[d["Ticker"]]["short_pct"])*100
+                      if float(previous[d["Ticker"]]["short_pct"]) < 1
+                      else float(previous[d["Ticker"]]["short_pct"])) >= high_thresh))
             if previous else None
         )
 
@@ -316,8 +337,7 @@ with tab1:
 
         pct_delta, pct_color = delta_str(pct_val, prev_pct_val, unit="%", higher_is_bad=True)
         dtc_delta, dtc_color = delta_str(dtc, prev_dtc, unit="d", higher_is_bad=True)
-
-        badge, badge_cls = signal_badge(pct_val, high_thresh, mid_thresh)
+        badge, badge_cls     = signal_badge(pct_val, high_thresh, mid_thresh)
 
         with cols[i % 2]:
             with st.container(border=True):
@@ -378,7 +398,7 @@ with tab1:
 # ════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.subheader("Institutional Holders — SEC 13F (quarterly)")
-    st.caption("Top holders by shares held. For quarter-over-quarter change history use WhaleWisdom.")
+    st.caption("Top holders by shares held.")
 
     for ticker in selected:
         with st.expander(f"**{ticker}** — Top Institutional Holders", expanded=False):
